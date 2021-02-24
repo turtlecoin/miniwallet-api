@@ -87,6 +87,7 @@ export class Wallet extends EventEmitter {
         if (err || !address) {
             throw new Error(err?.toString() || "Problem creating subwallet.");
         }
+        this.save();
         return { address };
     }
 
@@ -94,7 +95,12 @@ export class Wallet extends EventEmitter {
         address: string,
         offset = 0
     ): Promise<Partial<SerializedTx>[]> {
-        const txs = await this.getWallet().getTransactions(offset, 20);
+        const txs = await this.getWallet().getTransactions(
+            offset,
+            20,
+            false,
+            address
+        );
         return txs.map((tx) => serializeTx(tx));
     }
 

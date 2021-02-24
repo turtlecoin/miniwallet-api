@@ -10,7 +10,7 @@ import { IUser, SerializedTx } from "./types";
  */
 export class Storage extends EventEmitter {
     private dbPath: string;
-    private db: knex<any, unknown[]>;
+    public db: knex<any, unknown[]>;
 
     public static async create() {
         const storage = new Storage();
