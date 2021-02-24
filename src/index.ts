@@ -15,9 +15,14 @@ import { IUser, SerializedTx } from "./types";
 import { Transaction } from "turtlecoin-wallet-backend/dist/lib/Types";
 import { sleep } from "@extrahash/sleep";
 import { validateAddress, validatePaymentID } from "turtlecoin-wallet-backend";
+import rateLimit from "express-rate-limit";
 
 // tslint:disable-next-line: no-var-requires
 const queue = require("express-queue");
+const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 50, // limit each IP to 50 requests per windowMs
+});
 
 loadEnv();
 log.setLevel(process.env.LOG_LEVEL! as LogLevelDesc);
@@ -83,7 +88,7 @@ async function main() {
         res.sendStatus(200);
     });
 
-    app.post("/auth", async (req, res) => {
+    app.post("/auth", limiter, async (req, res) => {
         const { username, password } = req.body;
 
         if (!username || !password) {
@@ -126,7 +131,7 @@ async function main() {
         res.send(JSON.stringify(balance));
     });
 
-    app.post("/wallet/secrets", protect, async (req, res) => {
+    app.post("/wallet/secrets", protect, limiter, async (req, res) => {
         const { password } = req.body;
         const user = await storage.retrieveUser((req as any).user.userID);
         if (!user) {
@@ -213,7 +218,7 @@ async function main() {
         res.send(JSON.stringify((req as any).user));
     });
 
-    app.post("/register", async (req, res) => {
+    app.post("/register", limiter, async (req, res) => {
         const { username, password } = req.body;
 
         if (!usernameRegex.test(username)) {
