@@ -50,11 +50,7 @@ export const protect = (req: any, res: any, next: () => void) => {
     next();
 };
 
-const allowedOrigins = [
-    "http://localhost:8080",
-    "http://10.0.0.2:8080",
-    "https://trtl.co.in",
-];
+const allowedOrigins = ["http://localhost:8080", "https://trtl.co.in"];
 async function main() {
     const app = express();
     const storage = await Storage.create();
