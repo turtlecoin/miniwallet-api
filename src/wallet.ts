@@ -1,12 +1,12 @@
 import { EventEmitter } from "events";
-import {
-    createIntegratedAddress,
-    Daemon,
-    WalletBackend,
-} from "turtlecoin-wallet-backend";
+import { Daemon, WalletBackend } from "turtlecoin-wallet-backend";
 import fs from "fs";
 import crypto from "crypto";
 import log from "loglevel";
+import { serializeTx } from ".";
+import { SerializedTx } from "./types";
+// tslint:disable-next-line: no-submodule-imports
+import { SendTransactionResult } from "turtlecoin-wallet-backend/dist/lib/Types";
 
 export class Wallet extends EventEmitter {
     private static instance: Wallet;
@@ -32,35 +32,84 @@ export class Wallet extends EventEmitter {
     }
 
     public save() {
-        this.wallet?.saveWalletToFile(
+        this.getWallet().saveWalletToFile(
             process.env.WALLET_PATH!,
             process.env.WALLET_PASSWORD!
         );
     }
 
     public getWallet() {
-        return this.wallet!;
-    }
-
-    public async createAddress(): Promise<{
-        address: string;
-        paymentID: string;
-    }> {
         if (!this.wallet) {
             throw new Error("No wallet!");
         }
 
-        const paymentID = crypto.randomBytes(32).toString("hex");
-        const address = await createIntegratedAddress(
-            this.wallet.getPrimaryAddress(),
-            paymentID
+        return this.wallet;
+    }
+
+    public async getSecrets(
+        address: string
+    ): Promise<{
+        spendKey: string;
+        viewKey: string;
+    }> {
+        const [, spendKey] = await this.getWallet().getSpendKeys(address);
+        if (!spendKey) {
+            throw new Error("Can't get spendkey!");
+        }
+
+        const keys = {
+            spendKey,
+            viewKey: await this.getWallet().getPrivateViewKey(),
+        };
+        return keys;
+    }
+
+    public async sendTransaction(
+        sendFrom: string,
+        sendTo: string,
+        amount: number,
+        paymentID?: string
+    ): Promise<SendTransactionResult> {
+        return this.getWallet().sendTransactionAdvanced(
+            [[sendTo, amount]],
+            undefined,
+            undefined,
+            paymentID,
+            [sendFrom],
+            sendFrom
         );
-        return { address, paymentID };
+    }
+
+    public async createAddress(): Promise<{
+        address: string;
+    }> {
+        const [address, err] = await this.getWallet().addSubWallet();
+        if (err || !address) {
+            throw new Error(err?.toString() || "Problem creating subwallet.");
+        }
+        return { address };
+    }
+
+    public async getTransactionHistory(
+        address: string,
+        offset = 0
+    ): Promise<Partial<SerializedTx>[]> {
+        const txs = await this.getWallet().getTransactions(offset, 20);
+        return txs.map((tx) => serializeTx(tx));
+    }
+
+    public async getBalance(
+        address: string
+    ): Promise<{ unlocked: number; locked: number }> {
+        const [unlocked, locked] = (await this.getWallet().getBalance([
+            address,
+        ])) as number[];
+        return { unlocked, locked };
     }
 
     private async init() {
         if (!fs.existsSync(process.env.WALLET_PATH!)) {
-            console.log("Creating wallet file.");
+            log.info("Creating wallet file.");
             const newWallet = await WalletBackend.createWallet(this.daemon);
             newWallet.saveWalletToFile(
                 process.env.WALLET_PATH!,
@@ -81,9 +130,17 @@ export class Wallet extends EventEmitter {
         wallet.on(
             "heightchange",
             (walletHeight, localHeight, networkHeight) => {
-                console.log(`Sync: ${walletHeight}/${networkHeight}`);
+                console.log({ walletHeight, localHeight, networkHeight });
             }
         );
+
+        wallet.on("sync", () => {
+            log.info("Wallet is synchronized.");
+        });
+
+        wallet.on("desync", () => {
+            log.info("Wallet is desynchronized.");
+        });
 
         wallet.on("incomingtx", (transaction) => {
             log.info(
@@ -100,15 +157,14 @@ export class Wallet extends EventEmitter {
         });
 
         process.on("SIGINT", async () => {
-            console.log("Shutting down wallet, please wait.");
+            log.info("Shutting down wallet, please wait.");
             this.save();
             process.exit(0);
         });
 
         await wallet.start();
         log.info(`Started wallet, address ${wallet.getPrimaryAddress()}`);
-        this.wallet = wallet;
 
-        // await wallet.reset(3350000)
+        this.wallet = wallet;
     }
 }

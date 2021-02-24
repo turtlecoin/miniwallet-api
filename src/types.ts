@@ -4,12 +4,9 @@ export interface IUser {
     passwordHash: string;
     salt: string;
     address: string;
-    paymentID: string;
 }
 
-export interface SavedTransaction {
-    transactionID: number;
-    userID: number;
+export interface SerializedTx {
     blockHeight: number;
     fee: number;
     hash: string;

@@ -10,7 +10,7 @@ import { Storage } from "./storage";
 import { Wallet } from "./wallet";
 import crypto from "crypto";
 import { hashPassword } from "./utils/hashPassword";
-import { IUser, SavedTransaction } from "./types";
+import { IUser, SerializedTx } from "./types";
 // tslint:disable-next-line: no-submodule-imports
 import { Transaction } from "turtlecoin-wallet-backend/dist/lib/Types";
 import { sleep } from "@extrahash/sleep";
@@ -56,52 +56,6 @@ async function main() {
     const storage = await Storage.create();
     const wallet = await Wallet.getWallet();
 
-    const depositWorker = async () => {
-        while (true) {
-            console.log("Getting deposit work.");
-            const work = await storage.getDepositWork();
-            const [, localHeight] = await wallet.getWallet().getSyncStatus();
-            for (const deposit of work) {
-                const transaction = await wallet
-                    .getWallet()
-                    .getTransaction(deposit.hash);
-                if (!transaction) {
-                    log.warn("Transaction not found.");
-                    continue;
-                }
-                const confirmedBlock = localHeight - 120;
-                if (transaction.blockHeight < confirmedBlock) {
-                    log.info(`${transaction.hash} CONFIRMED`);
-                    await storage.markTransactionAvailable(transaction.hash);
-                } else {
-                    log.info(
-                        `${transaction.hash} ${
-                            transaction.blockHeight - confirmedBlock
-                        }/120 CONFIRMS`
-                    );
-                }
-            }
-            await sleep(30000);
-        }
-    };
-
-    wallet.on("incomingtx", async (transaction: Transaction) => {
-        log.info("Saving transaction.");
-        if (transaction.paymentID) {
-            const user = await storage.retrieveUserByPID(transaction.paymentID);
-            if (!user) {
-                console.warn("No user for PID.");
-                return;
-            }
-            storage.createTransaction(serializeTx(transaction, user.userID));
-        }
-    });
-
-    wallet.on("outgoingtx", (transaction: Transaction) => {
-        log.info("Updating outgoing tx.");
-        storage.updateTransaction(serializeTx(transaction));
-    });
-
     app.use(express.json({ limit: "256kb" }));
     app.use(cookieParser());
     app.use(morgan("dev"));
@@ -136,13 +90,11 @@ async function main() {
             res.sendStatus(400);
             return;
         }
-
         const user = await storage.retrieveUserByUsername(username);
         if (!user) {
-            res.status(401);
+            res.sendStatus(401);
             return;
         }
-
         const hash = await hashPassword(password, user.salt);
         if (hash !== user.passwordHash) {
             res.sendStatus(401);
@@ -162,18 +114,33 @@ async function main() {
 
     app.get("/wallet/transactions", protect, async (req, res) => {
         const user: IUser = (req as any).user;
-
-        console.log(user);
-        const txs = await storage.retrieveTransactions(
-            (req as any).user.userID
+        const txs = await wallet.getTransactionHistory(
+            (req as any).user.address
         );
         res.send(txs);
     });
 
     app.get("/wallet/balance", protect, async (req, res) => {
-        const paymentID: string = (req as any).user.paymentID;
-        const balance = await storage.retrieveBalance(paymentID);
+        const address: string = (req as any).user.address;
+        const balance = await wallet.getBalance(address);
         res.send(JSON.stringify(balance));
+    });
+
+    app.post("/wallet/secrets", protect, async (req, res) => {
+        const { password } = req.body;
+        const user = await storage.retrieveUser((req as any).user.userID);
+        if (!user) {
+            res.sendStatus(500);
+            return;
+        }
+        const hash = await hashPassword(password, user.salt);
+        if (hash !== user.passwordHash) {
+            res.sendStatus(401);
+            return;
+        }
+
+        const secrets = await wallet.getSecrets((req as any).user.address);
+        res.send(JSON.stringify(secrets));
     });
 
     app.post(
@@ -186,7 +153,6 @@ async function main() {
                 address: string;
                 paymentID?: string;
             };
-            console.log(amount);
             if (!Number.isInteger(amount)) {
                 res.status(400).send("Invalid amount.");
                 return;
@@ -208,36 +174,35 @@ async function main() {
                 );
                 return;
             }
-            const balance = await storage.retrieveBalance(
-                (req as any).user.paymentID
-            );
-            if (balance.available < amount) {
+            const balance = await wallet.getBalance((req as any).user.address);
+            if (balance.unlocked < amount) {
                 res.status(400).send("Insufficient funds in the account.");
                 return;
             }
 
             try {
-                const result = await wallet
-                    .getWallet()
-                    .sendTransactionBasic(address, amount, paymentID);
-                if (result.success) {
-                    const transaction: Partial<SavedTransaction> = {
-                        fee: result.fee!,
-                        hash: result.transactionHash!,
-                        paymentID: paymentID!,
-                        available: true,
-                        amount: amount * -1 - result.fee!,
-                        userID: (req as any).user.userID,
-                    };
-                    await storage.createTransaction(transaction);
-                    res.send(transaction);
-                    return;
-                } else {
-                    res.sendStatus(400);
-                    return;
+                const result = await wallet.sendTransaction(
+                    (req as any).user.address,
+                    address,
+                    amount,
+                    paymentID
+                );
+
+                if (!result.success) {
+                    throw new Error("Transaction creation failure.");
                 }
+                const transaction = await wallet
+                    .getWallet()
+                    .getTransaction(result.transactionHash!);
+                if (!transaction) {
+                    throw new Error(
+                        "Couldn't retrieve sent transaction details."
+                    );
+                }
+
+                res.status(200).send(serializeTx(transaction));
             } catch (err) {
-                console.log(err.toString());
+                log.error(err.toString());
                 res.sendStatus(500);
                 return;
             }
@@ -265,14 +230,13 @@ async function main() {
 
         const salt = crypto.randomBytes(24).toString("hex");
         const hash = await hashPassword(password, salt);
-        const { address, paymentID } = await wallet.createAddress();
+        const { address } = await wallet.createAddress();
 
         const user: Partial<IUser> = {
             username,
             passwordHash: hash,
             salt,
             address,
-            paymentID,
         };
 
         try {
@@ -297,16 +261,13 @@ async function main() {
     app.listen(Number(process.env.PORT!), () => {
         log.info(`API started on port ${process.env.PORT}`);
     });
-
-    depositWorker();
 }
 
 main();
 
-const serializeTx = (
-    transaction: Transaction,
-    userID?: number
-): Partial<SavedTransaction> => {
+export const serializeTx = (
+    transaction: Transaction
+): Partial<SerializedTx> => {
     return {
         blockHeight: transaction.blockHeight,
         fee: transaction.fee,
@@ -315,6 +276,5 @@ const serializeTx = (
         timestamp: transaction.timestamp,
         unlockTime: transaction.unlockTime,
         amount: transaction.totalAmount(),
-        userID,
     };
 };

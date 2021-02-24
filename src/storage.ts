@@ -1,6 +1,7 @@
 import { EventEmitter } from "events";
 import knex from "knex";
-import { IUser, SavedTransaction } from "./types";
+import log from "loglevel";
+import { IUser, SerializedTx } from "./types";
 
 /**
  * The default IStorage() implementation, using knex and sqlite3 driver
@@ -31,7 +32,7 @@ export class Storage extends EventEmitter {
     }
 
     public async close(): Promise<void> {
-        console.log("Closing database.");
+        log.info("Closing database.");
         await this.db.destroy();
     }
 
@@ -52,39 +53,6 @@ export class Storage extends EventEmitter {
         return rows[0];
     }
 
-    public async retrieveUserByPID(paymentID: string): Promise<IUser | null> {
-        const rows = await this.db("users")
-            .select()
-            .where({ paymentID })
-            .orWhere({});
-        if (rows.length === 0) {
-            return null;
-        }
-        return rows[0];
-    }
-
-    public async getDepositWork(): Promise<SavedTransaction[]> {
-        return this.db
-            .from("transactions")
-            .select()
-            .where({ available: false });
-    }
-
-    public async markTransactionAvailable(hash: string) {
-        await this.db("transactions")
-            .update({ available: true })
-            .where({ hash });
-    }
-
-    public async retrieveTransactions(
-        userID: number
-    ): Promise<SavedTransaction[]> {
-        return this.db("transactions")
-            .select()
-            .where({ userID })
-            .orderBy("transactionID", "desc");
-    }
-
     public async retrieveUserByUsername(
         username: string
     ): Promise<IUser | null> {
@@ -93,46 +61,6 @@ export class Storage extends EventEmitter {
             return null;
         }
         return rows[0];
-    }
-
-    public async createTransaction(
-        transaction: Partial<SavedTransaction>
-    ): Promise<void> {
-        await this.db("transactions").insert(transaction);
-    }
-
-    public async updateTransaction(
-        transaction: Partial<SavedTransaction>
-    ): Promise<void> {
-        await this.db("transactions")
-            .update(transaction)
-            .where({ hash: transaction.hash });
-    }
-
-    public async retrieveBalance(
-        paymentID: string
-    ): Promise<{ total: number; available: number }> {
-        const user = await this.retrieveUserByPID(paymentID);
-        if (!user) {
-            throw new Error("Couldn't find user!");
-        }
-
-        const rows: SavedTransaction[] = await this.db("transactions")
-            .select()
-            .where({ userID: user.userID });
-        const balance = {
-            total: 0,
-            available: 0,
-        };
-
-        for (const row of rows) {
-            balance.total += row.amount;
-            if (row.available) {
-                balance.available += row.amount;
-            }
-        }
-
-        return balance;
     }
 
     public async init() {
@@ -144,23 +72,7 @@ export class Storage extends EventEmitter {
                     table.string("username").unique();
                     table.string("passwordHash").unique();
                     table.string("salt").unique();
-                    table.string("address");
-                    table.string("paymentID").unique().index();
-                });
-            }
-
-            if (!(await this.db.schema.hasTable("transactions"))) {
-                await this.db.schema.createTable("transactions", (table) => {
-                    table.increments("transactionID");
-                    table.integer("userID").index();
-                    table.integer("blockHeight");
-                    table.integer("fee");
-                    table.string("hash").unique().index();
-                    table.string("paymentID").index();
-                    table.integer("timestamp");
-                    table.integer("unlockTime");
-                    table.bigInteger("amount");
-                    table.boolean("available").defaultTo(false);
+                    table.string("address").unique().index();
                 });
             }
 
