@@ -50,7 +50,11 @@ export const protect = (req: any, res: any, next: () => void) => {
     next();
 };
 
-const allowedOrigins = ["http://localhost:8080", "http://10.0.0.22:8080"];
+const allowedOrigins = [
+    "http://localhost:8080",
+    "http://10.0.0.22:8080",
+    "https://trtl.co.in",
+];
 async function main() {
     const app = express();
     const storage = await Storage.create();
@@ -125,7 +129,7 @@ async function main() {
     app.post("/logout", protect, async (req, res) => {
         const user: Partial<IUser> = (req as any).user;
         const token = jwt.sign({ user }, process.env.SPK!, { expiresIn: -1 });
-        res.cookie("auth", token);
+        res.cookie("auth", token, { httpOnly: req.hostname.includes("https") });
         res.sendStatus(200);
     });
 
