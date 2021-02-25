@@ -46,10 +46,11 @@ export class Storage extends EventEmitter {
     }
 
     public async retrieveUser(userID: number): Promise<IUser | null> {
-        const rows = await this.db("users").select().where({ userID });
+        const rows: IUser[] = await this.db("users").select().where({ userID });
         if (rows.length === 0) {
             return null;
         }
+        rows[0].twoFactor = Boolean(rows[0].twoFactor);
         return rows[0];
     }
 

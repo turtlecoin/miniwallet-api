@@ -401,6 +401,7 @@ async function main() {
             passwordHash: hash,
             salt,
             address,
+            twoFactor: false,
         };
 
         try {
