@@ -221,10 +221,11 @@ async function main() {
     });
 
     app.post("/auth", limiter, async (req, res) => {
+        console.log(req.body);
         const { username, password, totp } = req.body;
 
         if (!username || !password) {
-            res.sendStatus(400);
+            res.status(400).send("All fields are required.");
             return;
         }
         const user = await storage.retrieveUserByUsername(username);

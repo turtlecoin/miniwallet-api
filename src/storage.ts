@@ -54,13 +54,6 @@ export class Storage extends EventEmitter {
         return rows[0];
     }
 
-    public async updateUser(
-        userID: number,
-        user: Partial<IUser>
-    ): Promise<void> {
-        await this.db("users").update(user).where({ userID });
-    }
-
     public async retrieveUserByUsername(
         username: string
     ): Promise<IUser | null> {
@@ -68,7 +61,15 @@ export class Storage extends EventEmitter {
         if (rows.length === 0) {
             return null;
         }
+        rows[0].twoFactor = Boolean(rows[0].twoFactor);
         return rows[0];
+    }
+
+    public async updateUser(
+        userID: number,
+        user: Partial<IUser>
+    ): Promise<void> {
+        await this.db("users").update(user).where({ userID });
     }
 
     public async init() {
