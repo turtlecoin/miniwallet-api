@@ -55,7 +55,13 @@ export const protect = (req: any, res: any, next: () => void) => {
     next();
 };
 
-const allowedOrigins = ["http://localhost:8080", "https://trtl.co.in"];
+const allowedOrigins = [
+    "http://localhost:8080",
+    "https://trtl.co.in",
+    "https://www.trtl.co.in",
+    "http://trtlcoinonqzucp3usix72kol3nkhrinobmnewdm5742bbqjfhgietid.onion",
+    "http://www.trtlcoinonqzucp3usix72kol3nkhrinobmnewdm5742bbqjfhgietid.onion",
+];
 async function main() {
     const app = express();
     const storage = await Storage.create();
@@ -73,7 +79,10 @@ async function main() {
                     return callback(null, true);
                 }
                 if (!allowedOrigins.includes(origin)) {
-                    return callback(new Error("Invalid origin."), false);
+                    return callback(
+                        new Error(`Invalid origin ${origin}`),
+                        false
+                    );
                 }
                 return callback(null, true);
             },
@@ -214,8 +223,13 @@ async function main() {
         }
     );
 
-    app.get("/whoami", protect, (req, res) => {
-        res.send(JSON.stringify((req as any).user));
+    app.get("/whoami", (req, res) => {
+        const user: IUser | null = (req as any).user;
+        if (!user) {
+            res.sendStatus(204);
+            return;
+        }
+        res.send(JSON.stringify(user));
     });
 
     app.post("/register", limiter, async (req, res) => {
