@@ -53,6 +53,13 @@ export class Storage extends EventEmitter {
         return rows[0];
     }
 
+    public async updateUser(
+        userID: number,
+        user: Partial<IUser>
+    ): Promise<void> {
+        await this.db("users").update(user).where({ userID });
+    }
+
     public async retrieveUserByUsername(
         username: string
     ): Promise<IUser | null> {
@@ -73,6 +80,8 @@ export class Storage extends EventEmitter {
                     table.string("passwordHash").unique();
                     table.string("salt").unique();
                     table.string("address").unique().index();
+                    table.boolean("2fa");
+                    table.string("totpSecret");
                 });
             }
 

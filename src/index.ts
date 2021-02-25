@@ -16,6 +16,8 @@ import { Transaction } from "turtlecoin-wallet-backend/dist/lib/Types";
 import { sleep } from "@extrahash/sleep";
 import { validateAddress, validatePaymentID } from "turtlecoin-wallet-backend";
 import rateLimit from "express-rate-limit";
+import Speakeasy from "speakeasy";
+import QRCode from "qrcode";
 
 // tslint:disable-next-line: no-var-requires
 const queue = require("express-queue");
@@ -67,6 +69,8 @@ async function main() {
     const storage = await Storage.create();
     const wallet = await Wallet.getWallet();
 
+    const pending2FAKeys: Record<number, string> = {};
+
     app.use(express.json({ limit: "256kb" }));
     app.use(cookieParser());
     app.use(morgan("dev"));
@@ -79,10 +83,7 @@ async function main() {
                     return callback(null, true);
                 }
                 if (!allowedOrigins.includes(origin)) {
-                    return callback(
-                        new Error(`Invalid origin ${origin}`),
-                        false
-                    );
+                    return callback(null, false);
                 }
                 return callback(null, true);
             },
@@ -90,15 +91,137 @@ async function main() {
     );
     app.use(checkAuth);
 
+    app.get("/account/totp/secret", protect, async (req, res) => {
+        const secret = Speakeasy.generateSecret({
+            length: 20,
+            name: "miniwallet",
+        });
+        pending2FAKeys[(req as any).user.userID] = secret.base32;
+        setTimeout(() => {
+            if (pending2FAKeys[(req as any).user.userID] == secret.base32) {
+                delete pending2FAKeys[(req as any).user.userID];
+            }
+        }, 1000 * 60 * 20);
+        const qr = await QRCode.toBuffer(
+            `otpauth://totp/Miniwallet:${(req as any).user.username}?secret=${
+                secret.base32
+            }`
+        );
+        console.log("Generated secret:", secret.base32);
+        res.send({ secret: secret.base32, qr: qr.toString("base64") });
+    });
+
+    app.post("/account/totp/disenroll", protect, async (req, res) => {
+        const { token, password } = req.body;
+        const userEntry = await storage.retrieveUser((req as any).user.userID);
+        if (!userEntry) {
+            res.sendStatus(401);
+            return;
+        }
+        if (!userEntry.totpSecret) {
+            res.sendStatus(400);
+            return;
+        }
+        const hash = await hashPassword(password, userEntry.salt);
+        if (hash !== userEntry.passwordHash) {
+            res.sendStatus(401);
+            return;
+        }
+
+        const valid = Speakeasy.time.verify({
+            secret: userEntry.totpSecret,
+            encoding: "base32",
+            token,
+            window: 2,
+        });
+        if (valid) {
+            const updates = {
+                totpSecret: null,
+                twoFactor: false,
+            };
+            await storage.updateUser(userEntry.userID, updates);
+
+            const newTokenData: Partial<IUser> = { ...(req as any).user };
+            newTokenData.twoFactor = false;
+
+            const token = jwt.sign({ user: newTokenData }, process.env.SPK!, {
+                expiresIn: "1d",
+            });
+            res.cookie("auth", token);
+            res.send(JSON.stringify(newTokenData));
+        } else {
+            res.sendStatus(401);
+        }
+    });
+
+    app.post("/account/totp/enroll", protect, async (req, res) => {
+        if ((req as any).user.twoFactor) {
+            res.status(400).send(
+                "You already have 2FA enabled. Disable it first to set a new code."
+            );
+            return;
+        }
+        const secret = pending2FAKeys[(req as any).user.userID];
+        const { token } = req.body;
+        const user: IUser = (req as any).user;
+        const valid = Speakeasy.time.verify({
+            secret,
+            encoding: "base32",
+            token,
+            window: 2,
+        });
+        if (valid) {
+            const updates = {
+                totpSecret: secret,
+                twoFactor: true,
+            };
+            await storage.updateUser(user.userID, updates);
+            const newTokenData: Partial<IUser> = { ...(req as any).user };
+            newTokenData.twoFactor = true;
+            const token = jwt.sign({ user: newTokenData }, process.env.SPK!, {
+                expiresIn: "1d",
+            });
+            res.cookie("auth", token);
+            res.send(JSON.stringify(newTokenData));
+        } else {
+            res.sendStatus(401);
+        }
+    });
+
+    app.post("/account/password", protect, async (req, res) => {
+        const {
+            oldPassword,
+            newPassword,
+        }: { oldPassword: string; newPassword: string } = req.body;
+        const user = await storage.retrieveUser((req as any).user.userID);
+        if (!user) {
+            res.sendStatus(401);
+            return;
+        }
+        const hash = await hashPassword(oldPassword, user.salt);
+        if (hash !== user.passwordHash) {
+            res.sendStatus(401);
+            return;
+        }
+        const salt = crypto.randomBytes(24).toString("hex");
+        const newHash = await hashPassword(newPassword, salt);
+
+        await storage.updateUser((req as any).user.userID, {
+            salt,
+            passwordHash: newHash,
+        });
+        res.sendStatus(200);
+    });
+
     app.post("/logout", protect, async (req, res) => {
         const user: Partial<IUser> = (req as any).user;
         const token = jwt.sign({ user }, process.env.SPK!, { expiresIn: -1 });
-        res.cookie("auth", token, { httpOnly: req.hostname.includes("https") });
+        res.cookie("auth", token);
         res.sendStatus(200);
     });
 
     app.post("/auth", limiter, async (req, res) => {
-        const { username, password } = req.body;
+        const { username, password, totp } = req.body;
 
         if (!username || !password) {
             res.sendStatus(400);
@@ -115,9 +238,31 @@ async function main() {
             return;
         }
 
+        if (user.twoFactor) {
+            if (!totp) {
+                res.sendStatus(202);
+                return;
+            }
+            if (!user.totpSecret) {
+                res.sendStatus(500);
+                return;
+            }
+            const valid = Speakeasy.time.verify({
+                secret: user.totpSecret,
+                encoding: "base32",
+                token: totp,
+                window: 2,
+            });
+            if (!valid) {
+                res.sendStatus(403);
+                return;
+            }
+        }
+
         const tokenData: Partial<IUser> = user;
         delete tokenData.passwordHash;
         delete tokenData.salt;
+        delete tokenData.totpSecret;
 
         const token = jwt.sign({ user: tokenData }, process.env.SPK!, {
             expiresIn: "1d",
