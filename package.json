@@ -15,6 +15,7 @@
         "lint-fix": "./node_modules/tslint/bin/tslint src/**/*.ts{,x} --fix"
     },
     "devDependencies": {
+        "@types/atob": "^2.1.2",
         "@types/cookie-parser": "^1.4.2",
         "@types/cors": "^2.8.10",
         "@types/express": "^4.17.11",
@@ -45,6 +46,8 @@
     },
     "dependencies": {
         "@extrahash/sleep": "^1.0.0",
+        "atob": "^2.1.2",
+        "axios": "^0.21.1",
         "cookie-parser": "^1.4.5",
         "cors": "^2.8.5",
         "dotenv": "^8.2.0",

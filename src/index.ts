@@ -18,6 +18,7 @@ import { validateAddress, validatePaymentID } from "turtlecoin-wallet-backend";
 import rateLimit from "express-rate-limit";
 import Speakeasy from "speakeasy";
 import QRCode from "qrcode";
+import { PriceScraper } from "./PriceScraper";
 
 // tslint:disable-next-line: no-var-requires
 const queue = require("express-queue");
@@ -68,6 +69,7 @@ async function main() {
     const app = express();
     const storage = await Storage.create();
     const wallet = await Wallet.getWallet();
+    const priceScraper = new PriceScraper();
 
     const pending2FAKeys: Record<number, string> = {};
 
@@ -368,6 +370,10 @@ async function main() {
             }
         }
     );
+
+    app.get("/price", protect, (req, res) => {
+        res.send(JSON.stringify(priceScraper.getPrices()));
+    });
 
     app.get("/whoami", (req, res) => {
         const user: IUser | null = (req as any).user;
