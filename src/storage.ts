@@ -2,6 +2,7 @@ import { EventEmitter } from "events";
 import knex from "knex";
 import log from "loglevel";
 import { IUser, SerializedTx } from "./types";
+import { hashUser } from "./utils/hashUser";
 
 /**
  * The default IStorage() implementation, using knex and sqlite3 driver
@@ -37,12 +38,17 @@ export class Storage extends EventEmitter {
     }
 
     public async createUser(user: Partial<IUser>): Promise<IUser> {
-        const inserted = await this.db("users").insert(user);
+        const newUser = { ...user };
+        newUser.userHash = hashUser(newUser);
+        const inserted = await this.db("users").insert(newUser);
+        return (await this.retrieveUser(inserted[0]))!;
+    }
 
-        const completedUser = { ...user };
-        completedUser.userID = inserted[0];
-
-        return completedUser as IUser;
+    public async retrieveAllUsers(): Promise<IUser[]> {
+        return (await this.db("users").select()).map((user: IUser) => {
+            user.twoFactor = Boolean(user.twoFactor);
+            return user;
+        });
     }
 
     public async retrieveUser(userID: number): Promise<IUser | null> {
@@ -65,11 +71,24 @@ export class Storage extends EventEmitter {
         return rows[0];
     }
 
+    public async updateUserHash(userID: number) {
+        const user = await this.retrieveUser(userID);
+        if (!user) {
+            throw new Error("Couldn't find user!");
+        }
+
+        const userHash = hashUser(user);
+        if (userHash !== user.userHash) {
+            await this.updateUser(user.userID, { userHash });
+        }
+    }
+
     public async updateUser(
         userID: number,
         user: Partial<IUser>
     ): Promise<void> {
         await this.db("users").update(user).where({ userID });
+        await this.updateUserHash(userID);
     }
 
     public async init() {
@@ -82,8 +101,9 @@ export class Storage extends EventEmitter {
                     table.string("passwordHash").unique();
                     table.string("salt").unique();
                     table.string("address").unique().index();
-                    table.boolean("2fa");
+                    table.boolean("twoFactor");
                     table.string("totpSecret");
+                    table.string("userHash");
                 });
             }
 

@@ -33,7 +33,7 @@ export class PriceScraper {
     private async scrape() {
         while (true) {
             await this.getData(monitoredCurrencies);
-            await sleep(30000);
+            await sleep(10000);
         }
     }
 }

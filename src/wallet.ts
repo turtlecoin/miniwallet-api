@@ -136,7 +136,7 @@ export class Wallet extends EventEmitter {
         wallet.on(
             "heightchange",
             (walletHeight, localHeight, networkHeight) => {
-                console.log({ walletHeight, localHeight, networkHeight });
+                // console.log({ walletHeight, localHeight, networkHeight });
             }
         );
 

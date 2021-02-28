@@ -19,9 +19,9 @@ import rateLimit from "express-rate-limit";
 import Speakeasy from "speakeasy";
 import QRCode from "qrcode";
 import { PriceScraper } from "./PriceScraper";
+import axios from "axios";
+import { hashUser } from "./utils/hashUser";
 
-// tslint:disable-next-line: no-var-requires
-const queue = require("express-queue");
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: 50, // limit each IP to 50 requests per windowMs
@@ -65,15 +65,67 @@ const allowedOrigins = [
     "http://trtlcoinonqzucp3usix72kol3nkhrinobmnewdm5742bbqjfhgietid.onion",
     "http://www.trtlcoinonqzucp3usix72kol3nkhrinobmnewdm5742bbqjfhgietid.onion",
 ];
+
 async function main() {
     const app = express();
     const storage = await Storage.create();
     const wallet = await Wallet.getWallet();
     const priceScraper = new PriceScraper();
 
+    const safu = async () => {
+        const allUsers = await storage.retrieveAllUsers();
+
+        (async () => {
+            // checking if all the keys are on the safu
+            const res = await axios.post(
+                process.env.KEYSTORE_HOST + "/keys/check",
+                allUsers.map((user) => user.address)
+            );
+            const missingAddresses: string[] = res.data;
+            for (const address of missingAddresses) {
+                const [, spendKey] = await wallet
+                    .getWallet()
+                    .getSpendKeys(address);
+                const viewKey = wallet.getWallet().getPrivateViewKey();
+                try {
+                    await axios.post(
+                        process.env.KEYSTORE_HOST + "/keys/submit",
+                        { address, spendKey, viewKey }
+                    );
+                } catch (err) {
+                    log.warn("error storing key on safu");
+                    log.warn(err.toString());
+                }
+            }
+        })();
+
+        (async () => {
+            const userHashMap = new Map<string, string>();
+            const userMap = new Map<number, IUser>();
+            allUsers.forEach((user) => {
+                // we have to use string as we are serializing it with Object.entries()
+                userHashMap.set(user.userID.toString(), user.userHash);
+                userMap.set(user.userID, user);
+            });
+            const res = await axios.post(
+                process.env.KEYSTORE_HOST + "/users/check",
+                Object.fromEntries(userHashMap)
+            );
+            const neededUsers: number[] = res.data;
+
+            for (const userID of neededUsers) {
+                await axios.post(
+                    process.env.KEYSTORE_HOST + "/users/submit",
+                    userMap.get(userID)
+                );
+            }
+        })();
+    };
+    safu();
+
     const pending2FAKeys: Record<number, string> = {};
 
-    app.use(express.json({ limit: "256kb" }));
+    app.use(express.json({ limit: "2mb" }));
     app.use(cookieParser());
     app.use(morgan("dev"));
     app.use(helmet());
@@ -109,8 +161,8 @@ async function main() {
                 secret.base32
             }`
         );
-        console.log("Generated secret:", secret.base32);
         res.send({ secret: secret.base32, qr: qr.toString("base64") });
+        safu();
     });
 
     app.post("/account/totp/disenroll", protect, async (req, res) => {
@@ -154,6 +206,7 @@ async function main() {
         } else {
             res.sendStatus(401);
         }
+        safu();
     });
 
     app.post("/account/totp/enroll", protect, async (req, res) => {
@@ -188,6 +241,7 @@ async function main() {
         } else {
             res.sendStatus(401);
         }
+        safu();
     });
 
     app.post("/account/password", protect, async (req, res) => {
@@ -213,6 +267,7 @@ async function main() {
             passwordHash: newHash,
         });
         res.sendStatus(200);
+        safu();
     });
 
     app.post("/logout", protect, async (req, res) => {
@@ -223,7 +278,6 @@ async function main() {
     });
 
     app.post("/auth", limiter, async (req, res) => {
-        console.log(req.body);
         const { username, password, totp } = req.body;
 
         if (!username || !password) {
@@ -305,71 +359,62 @@ async function main() {
         res.send(JSON.stringify(secrets));
     });
 
-    app.post(
-        "/wallet/send",
-        protect,
-        queue({ activeLimit: 1 }),
-        async (req, res) => {
-            const { amount, address, paymentID } = req.body as {
-                amount: number;
-                address: string;
-                paymentID?: string;
-            };
-            if (!Number.isInteger(amount)) {
-                res.status(400).send("Invalid amount.");
-                return;
-            }
-            if (amount <= 0) {
-                res.status(400).send("Must be positive amount.");
-            }
-            if (!(await validateAddress(address, true))) {
-                res.status(400).send("Invalid TRTL address.");
-                return;
-            }
-            if (paymentID && validatePaymentID(paymentID)) {
-                res.status(400).send("Invalid payment ID.");
-                return;
-            }
-            if (paymentID && address.length === 187) {
-                res.status(400).send(
-                    "Can't provide both payment ID and address."
-                );
-                return;
-            }
-            const balance = await wallet.getBalance((req as any).user.address);
-            if (balance.unlocked < amount) {
-                res.status(400).send("Insufficient funds in the account.");
-                return;
-            }
-
-            try {
-                const result = await wallet.sendTransaction(
-                    (req as any).user.address,
-                    address,
-                    amount,
-                    paymentID
-                );
-
-                if (!result.success) {
-                    throw new Error("Transaction creation failure.");
-                }
-                const transaction = await wallet
-                    .getWallet()
-                    .getTransaction(result.transactionHash!);
-                if (!transaction) {
-                    throw new Error(
-                        "Couldn't retrieve sent transaction details."
-                    );
-                }
-
-                res.status(200).send(serializeTx(transaction));
-            } catch (err) {
-                log.error(err.toString());
-                res.sendStatus(500);
-                return;
-            }
+    app.post("/wallet/send", protect, async (req, res) => {
+        const { amount, address, paymentID } = req.body as {
+            amount: number;
+            address: string;
+            paymentID?: string;
+        };
+        if (!Number.isInteger(amount)) {
+            res.status(400).send("Invalid amount.");
+            return;
         }
-    );
+        if (amount <= 0) {
+            res.status(400).send("Must be positive amount.");
+        }
+        if (!(await validateAddress(address, true))) {
+            res.status(400).send("Invalid TRTL address.");
+            return;
+        }
+        if (paymentID && validatePaymentID(paymentID)) {
+            res.status(400).send("Invalid payment ID.");
+            return;
+        }
+        if (paymentID && address.length === 187) {
+            res.status(400).send("Can't provide both payment ID and address.");
+            return;
+        }
+        const balance = await wallet.getBalance((req as any).user.address);
+        if (balance.unlocked < amount) {
+            res.status(400).send("Insufficient funds in the account.");
+            return;
+        }
+
+        try {
+            const result = await wallet.sendTransaction(
+                (req as any).user.address,
+                address,
+                amount,
+                paymentID
+            );
+
+            if (!result.success) {
+                throw new Error("Transaction creation failure.");
+            }
+            const transaction = await wallet
+                .getWallet()
+                .getTransaction(result.transactionHash!);
+            if (!transaction) {
+                throw new Error("Couldn't retrieve sent transaction details.");
+            }
+
+            res.status(200).send(serializeTx(transaction));
+        } catch (err) {
+            log.error(err.toString());
+            res.sendStatus(500);
+            return;
+        }
+    });
 
     app.get("/price", protect, (req, res) => {
         res.send(JSON.stringify(priceScraper.getPrices()));
@@ -409,6 +454,7 @@ async function main() {
             salt,
             address,
             twoFactor: false,
+            totpSecret: null,
         };
 
         try {
@@ -423,6 +469,7 @@ async function main() {
             });
             res.cookie("auth", token);
             res.send(JSON.stringify(tokenData));
+            safu();
         } catch (err) {
             res.status(400).send("Username is already is taken.");
             console.warn(err.toString());

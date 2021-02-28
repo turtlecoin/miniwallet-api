@@ -6,6 +6,7 @@ export interface IUser {
     address: string;
     twoFactor: boolean;
     totpSecret: string | null;
+    userHash: string;
 }
 
 export interface SerializedTx {
