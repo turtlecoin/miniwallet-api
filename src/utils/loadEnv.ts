@@ -12,6 +12,9 @@ export function loadEnv(): void {
         "WALLET_PATH",
         "WALLET_PASSWORD",
         "SPK",
+        "KEYSTORE_HOST",
+        "DAEMON_PORT",
+        "DAEMON_URI",
     ];
     for (const required of requiredEnvVars) {
         if (process.env[required] === undefined) {
