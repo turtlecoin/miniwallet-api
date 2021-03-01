@@ -7,9 +7,12 @@ import { serializeTx } from ".";
 import { SerializedTx } from "./types";
 // tslint:disable-next-line: no-submodule-imports
 import { SendTransactionResult } from "turtlecoin-wallet-backend/dist/lib/Types";
+import { Address } from "turtlecoin-utils";
 
 export class Wallet extends EventEmitter {
     private static instance: Wallet;
+    private syncData = { wallet: 0, daemon: 0 };
+    private publicViewKey: string | null = null;
 
     public static getWallet = async () => {
         if (!Wallet.instance) {
@@ -31,11 +34,19 @@ export class Wallet extends EventEmitter {
         );
     }
 
+    public getSyncData() {
+        return this.syncData;
+    }
+
     public save() {
         this.getWallet().saveWalletToFile(
             process.env.WALLET_PATH!,
             process.env.WALLET_PASSWORD!
         );
+    }
+
+    public getPublicViewKey() {
+        return this.publicViewKey!;
     }
 
     public getWallet() {
@@ -126,7 +137,10 @@ export class Wallet extends EventEmitter {
         const [wallet, err] = await WalletBackend.openWalletFromFile(
             this.daemon,
             process.env.WALLET_PATH!,
-            process.env.WALLET_PASSWORD!
+            process.env.WALLET_PASSWORD!,
+            {
+                scanCoinbaseTransactions: true,
+            }
         );
 
         if (!wallet) {
@@ -136,7 +150,17 @@ export class Wallet extends EventEmitter {
         wallet.on(
             "heightchange",
             (walletHeight, localHeight, networkHeight) => {
-                // console.log({ walletHeight, localHeight, networkHeight });
+                if (
+                    this.syncData.wallet == walletHeight &&
+                    this.syncData.daemon == localHeight
+                ) {
+                    return;
+                }
+
+                this.syncData.wallet = walletHeight;
+                this.syncData.daemon = localHeight;
+
+                this.emit("sync", this.syncData);
             }
         );
 
@@ -148,18 +172,23 @@ export class Wallet extends EventEmitter {
             log.info("Wallet is desynchronized.");
         });
 
-        wallet.on("incomingtx", (transaction) => {
-            log.info(
-                `Incoming transaction of ${transaction.totalAmount()} to ${
-                    transaction.paymentID
-                }`
-            );
-            this.emit("incomingtx", transaction);
-        });
+        wallet.on("transaction", async (transaction) => {
+            log.info(`Transaction of ${transaction.totalAmount()}`);
 
-        wallet.on("outgoingtx", (transaction) => {
-            log.info(`Outgoing transaction of ${transaction.totalAmount()}`);
-            this.emit("outgoingtx", transaction);
+            const transactionMap = new Map<string, Partial<SerializedTx>>();
+            for (const [publicSpendKey, amount] of transaction.transfers) {
+                const sendingAddress = await Address.fromPublicKeys(
+                    publicSpendKey,
+                    this.getPublicViewKey()
+                );
+                // just in case one transaction is sent to multiple addresses
+                transactionMap.set(await sendingAddress.address(), {
+                    ...serializeTx(transaction),
+                    amount,
+                });
+            }
+
+            this.emit("transaction", transactionMap);
         });
 
         process.on("SIGINT", async () => {
@@ -167,6 +196,11 @@ export class Wallet extends EventEmitter {
             this.save();
             process.exit(0);
         });
+
+        const mainAddress = await Address.fromAddress(
+            wallet.getPrimaryAddress()
+        );
+        this.publicViewKey = mainAddress.view["m_publicKey"] as string;
 
         await wallet.start();
         log.info(`Started wallet, address ${wallet.getPrimaryAddress()}`);

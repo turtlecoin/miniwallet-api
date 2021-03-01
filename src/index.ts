@@ -8,6 +8,7 @@ import cookieParser from "cookie-parser";
 import jwt from "jsonwebtoken";
 import { Storage } from "./storage";
 import { Wallet } from "./wallet";
+import expressWs from "express-ws";
 import crypto from "crypto";
 import { hashPassword } from "./utils/hashPassword";
 import { IUser, SerializedTx } from "./types";
@@ -21,6 +22,8 @@ import QRCode from "qrcode";
 import { PriceScraper } from "./PriceScraper";
 import axios from "axios";
 import { hashUser } from "./utils/hashUser";
+import * as uuid from "uuid";
+import WebSocket from "ws";
 
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
@@ -43,7 +46,7 @@ const checkAuth = (req: any, res: any, next: () => void) => {
             (req as any).user = (result as any).user;
             (req as any).exp = (result as any).exp;
         } catch (err) {
-            console.warn(err.toString());
+            log.warn(err.toString());
         }
     }
     next();
@@ -67,10 +70,27 @@ const allowedOrigins = [
 ];
 
 async function main() {
-    const app = express();
+    const expWs = expressWs(express());
+    const app = expWs.app;
     const storage = await Storage.create();
     const wallet = await Wallet.getWallet();
     const priceScraper = new PriceScraper();
+
+    const clients = new Map<string, { user: IUser; socket: WebSocket }>();
+
+    const notify = (address: string, message: string) => {
+        for (const [id, clientData] of clients.entries()) {
+            if (clientData.user.address == address) {
+                clientData.socket.send(message);
+            }
+        }
+    };
+
+    const broadcast = (message: string) => {
+        for (const [id, clientData] of clients.entries()) {
+            clientData.socket.send(message);
+        }
+    };
 
     const safu = async () => {
         const allUsers = await storage.retrieveAllUsers();
@@ -125,6 +145,24 @@ async function main() {
 
     const pending2FAKeys: Record<number, string> = {};
 
+    priceScraper.on(
+        "prices",
+        (data: { bitcoin: number; ethereum: number; turtlecoin: number }) => {
+            broadcast(JSON.stringify({ type: "prices", data }));
+        }
+    );
+
+    wallet.on("transaction", (txMap: Map<string, Partial<SerializedTx>>) => {
+        for (const [address, data] of txMap.entries()) {
+            notify(address, JSON.stringify({ type: "transaction", data }));
+        }
+    });
+
+    wallet.on("sync", (data: { wallet: number; daemon: number }) => {
+        log.info(`Synced: ${data.wallet}/${data.daemon}`);
+        broadcast(JSON.stringify({ type: "sync", data }));
+    });
+
     app.use(express.json({ limit: "2mb" }));
     app.use(cookieParser());
     app.use(morgan("dev"));
@@ -163,6 +201,10 @@ async function main() {
         );
         res.send({ secret: secret.base32, qr: qr.toString("base64") });
         safu();
+    });
+
+    app.get("/wallet/sync", protect, async (req, res) => {
+        res.send(wallet.getSyncData());
     });
 
     app.post("/account/totp/disenroll", protect, async (req, res) => {
@@ -472,9 +514,60 @@ async function main() {
             safu();
         } catch (err) {
             res.status(400).send("Username is already is taken.");
-            console.warn(err.toString());
+            log.warn(err.toString());
             return;
         }
+    });
+
+    app.ws("/socket", (ws, req) => {
+        const user: IUser = (req as any).user;
+        const clientID = uuid.v4();
+        console.log("New client", clientID);
+
+        let alive = true;
+        let missedPings = 0;
+
+        const heartbeat = () => {
+            alive = true;
+        };
+
+        ws.on("message", (message) => {
+            try {
+                const msg = JSON.parse(message as string);
+                const { type } = msg;
+                switch (type) {
+                    case "pong":
+                        heartbeat();
+                        break;
+                    case "ping":
+                        if (!alive) {
+                            console.warn("Ping no response from " + clientID);
+                            ws.terminate();
+                            return;
+                        }
+                        alive = false;
+                        ws.send(JSON.stringify({ type: "pong" }));
+                        break;
+                    default:
+                        log.warn("Unsupported message type", type);
+                        break;
+                }
+            } catch (err) {
+                log.warn(err.toString());
+            }
+        });
+
+        const pingInterval = setInterval(
+            () => ws.send(JSON.stringify({ type: "ping" })),
+            10000
+        );
+        ws.on("close", () => {
+            clearInterval(pingInterval);
+            console.log("Removing client", clientID);
+            clients.delete(clientID);
+        });
+
+        clients.set(clientID, { user, socket: ws });
     });
 
     app.listen(Number(process.env.PORT!), () => {

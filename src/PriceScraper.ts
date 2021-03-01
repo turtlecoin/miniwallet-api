@@ -1,10 +1,11 @@
 import axios from "axios";
 import atob from "atob";
 import { sleep } from "@extrahash/sleep";
+import { EventEmitter } from "events";
 
 const monitoredCurrencies = ["turtlecoin", "bitcoin", "ethereum"];
 
-export class PriceScraper {
+export class PriceScraper extends EventEmitter {
     private prices: Record<string, number> = {
         ethereum: 0,
         bitcoin: 0,
@@ -12,6 +13,7 @@ export class PriceScraper {
     };
 
     constructor() {
+        super();
         this.scrape();
     }
 
@@ -25,8 +27,15 @@ export class PriceScraper {
                 ids.join(",")
             )}&vs_currencies=usd`
         );
+        let diff = false;
         for (const id in res.data) {
-            this.prices[id] = res.data[id].usd;
+            if (this.prices[id] != res.data[id].usd) {
+                this.prices[id] = res.data[id].usd;
+                diff = true;
+            }
+        }
+        if (diff) {
+            this.emit("prices", this.prices);
         }
     }
 
