@@ -15,7 +15,11 @@ import { IUser, SerializedTx } from "./types";
 // tslint:disable-next-line: no-submodule-imports
 import { Transaction } from "turtlecoin-wallet-backend/dist/lib/Types";
 import { sleep } from "@extrahash/sleep";
-import { validateAddress, validatePaymentID } from "turtlecoin-wallet-backend";
+import {
+    validateAddress,
+    validateAddresses,
+    validatePaymentID,
+} from "turtlecoin-wallet-backend";
 import rateLimit from "express-rate-limit";
 import Speakeasy from "speakeasy";
 import QRCode from "qrcode";
@@ -23,7 +27,9 @@ import { PriceScraper } from "./PriceScraper";
 import axios from "axios";
 import { hashUser } from "./utils/hashUser";
 import * as uuid from "uuid";
+import fs from "fs";
 import WebSocket from "ws";
+import path from "path";
 
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
@@ -34,6 +40,10 @@ loadEnv();
 log.setLevel(process.env.LOG_LEVEL! as LogLevelDesc);
 
 const usernameRegex = /^[a-zA-Z0-9_]{3,20}$/;
+
+if (!fs.existsSync("qrs")) {
+    fs.mkdirSync("qrs");
+}
 
 const checkAuth = (req: any, res: any, next: () => void) => {
     const token = req.cookies.auth;
@@ -78,9 +88,86 @@ async function main() {
 
     const clients = new Map<string, { user: IUser; socket: WebSocket }>();
 
+    const require2FA = async (req: any, res: any, next: () => void) => {
+        if (!req.userEntry) {
+            const userEntry = await storage.retrieveUser(
+                (req as any).user.userID
+            );
+            if (!userEntry) {
+                res.sendStatus(500);
+                return;
+            }
+            req.userEntry = userEntry;
+        }
+
+        if (!req.user.twoFactor) {
+            next();
+            return;
+        }
+
+        const { totp, token }: { token: string; totp: string } = req.body;
+
+        if (!totp && !token) {
+            res.status(401).send("Invalid credentials.");
+            return;
+        }
+
+        if (!req.userEntry.twoFactor) {
+            next();
+            return;
+        }
+
+        const valid = Speakeasy.time.verify({
+            secret: req.userEntry.totpSecret,
+            encoding: "base32",
+            // TODO: clean this up in future versions, standardize
+            token: totp || token,
+            window: 2,
+        });
+        if (valid) {
+            next();
+        } else {
+            res.status(401).send("Invalid credentials.");
+            return;
+        }
+    };
+
+    const requirePW = async (req: any, res: any, next: () => void) => {
+        const { password } = req.body;
+
+        if (!password && !req.body.oldPassword) {
+            res.status(401).send("Invalid credentials.");
+            return;
+        }
+
+        if (!req.userEntry) {
+            const userEntry = await storage.retrieveUser(
+                (req as any).user.userID
+            );
+            if (!userEntry) {
+                res.status(401).send("Invalid credentials.");
+                return;
+            }
+            req.userEntry = userEntry;
+        }
+
+        // for old change pw impementation, remember to remove after a couple versions
+        const hash = await hashPassword(
+            password || req.body.oldPassword,
+            req.userEntry.salt
+        );
+
+        if (hash !== req.userEntry.passwordHash) {
+            res.status(401).send("Invalid credentials.");
+            return;
+        }
+        console.log("Password correct.");
+        next();
+    };
+
     const notify = (address: string, message: string) => {
         for (const [id, clientData] of clients.entries()) {
-            if (clientData.user.address == address) {
+            if (clientData.user?.address == address) {
                 clientData.socket.send(message);
             }
         }
@@ -183,6 +270,38 @@ async function main() {
     );
     app.use(checkAuth);
 
+    app.get("/wallet/sync", protect, async (req, res) => {
+        res.send(wallet.getSyncData());
+    });
+
+    app.get("/qr/:address", protect, async (req, res) => {
+        const { address } = req.params;
+        fs.access("qrs/" + address, undefined, async (err) => {
+            if (err) {
+                console.log(err.toString());
+                if (!validateAddress(address, true)) {
+                    res.sendStatus(400);
+                    return;
+                }
+                QRCode.toFile(
+                    path.resolve(".", "./qrs/" + address),
+                    address,
+                    (err) => {
+                        if (err) {
+                            res.sendStatus(500);
+                            return;
+                        }
+                        res.set("Cache-control", "public, max-age=31536000");
+                        res.sendFile(path.resolve(".", "./qrs/" + address));
+                    }
+                );
+            } else {
+                res.set("Cache-control", "public, max-age=31536000");
+                res.sendFile(path.resolve(".", "qrs/" + address));
+            }
+        });
+    });
+
     app.get("/account/totp/secret", protect, async (req, res) => {
         const secret = Speakeasy.generateSecret({
             length: 20,
@@ -203,39 +322,17 @@ async function main() {
         safu();
     });
 
-    app.get("/wallet/sync", protect, async (req, res) => {
-        res.send(wallet.getSyncData());
-    });
-
-    app.post("/account/totp/disenroll", protect, async (req, res) => {
-        const { token, password } = req.body;
-        const userEntry = await storage.retrieveUser((req as any).user.userID);
-        if (!userEntry) {
-            res.sendStatus(401);
-            return;
-        }
-        if (!userEntry.totpSecret) {
-            res.sendStatus(400);
-            return;
-        }
-        const hash = await hashPassword(password, userEntry.salt);
-        if (hash !== userEntry.passwordHash) {
-            res.sendStatus(401);
-            return;
-        }
-
-        const valid = Speakeasy.time.verify({
-            secret: userEntry.totpSecret,
-            encoding: "base32",
-            token,
-            window: 2,
-        });
-        if (valid) {
+    app.post(
+        "/account/totp/disenroll",
+        protect,
+        requirePW,
+        require2FA,
+        async (req, res) => {
             const updates = {
                 totpSecret: null,
                 twoFactor: false,
             };
-            await storage.updateUser(userEntry.userID, updates);
+            await storage.updateUser((req as any).user.userID, updates);
 
             const newTokenData: Partial<IUser> = { ...(req as any).user };
             newTokenData.twoFactor = false;
@@ -245,11 +342,10 @@ async function main() {
             });
             res.cookie("auth", token);
             res.send(JSON.stringify(newTokenData));
-        } else {
-            res.sendStatus(401);
+
+            safu();
         }
-        safu();
-    });
+    );
 
     app.post("/account/totp/enroll", protect, async (req, res) => {
         if ((req as any).user.twoFactor) {
@@ -281,36 +377,30 @@ async function main() {
             res.cookie("auth", token);
             res.send(JSON.stringify(newTokenData));
         } else {
-            res.sendStatus(401);
+            res.status(401).send("Invalid credentials.");
         }
         safu();
     });
 
-    app.post("/account/password", protect, async (req, res) => {
-        const {
-            oldPassword,
-            newPassword,
-        }: { oldPassword: string; newPassword: string } = req.body;
-        const user = await storage.retrieveUser((req as any).user.userID);
-        if (!user) {
-            res.sendStatus(401);
-            return;
-        }
-        const hash = await hashPassword(oldPassword, user.salt);
-        if (hash !== user.passwordHash) {
-            res.sendStatus(401);
-            return;
-        }
-        const salt = crypto.randomBytes(24).toString("hex");
-        const newHash = await hashPassword(newPassword, salt);
+    app.post(
+        "/account/password",
+        protect,
+        requirePW,
+        require2FA,
+        async (req, res) => {
+            const { newPassword }: { newPassword: string } = req.body;
 
-        await storage.updateUser((req as any).user.userID, {
-            salt,
-            passwordHash: newHash,
-        });
-        res.sendStatus(200);
-        safu();
-    });
+            const salt = crypto.randomBytes(24).toString("hex");
+            const newHash = await hashPassword(newPassword, salt);
+
+            await storage.updateUser((req as any).user.userID, {
+                salt,
+                passwordHash: newHash,
+            });
+            res.sendStatus(200);
+            safu();
+        }
+    );
 
     app.post("/logout", protect, async (req, res) => {
         const user: Partial<IUser> = (req as any).user;
@@ -328,12 +418,12 @@ async function main() {
         }
         const user = await storage.retrieveUserByUsername(username);
         if (!user) {
-            res.sendStatus(401);
+            res.status(401).send("Invalid credentials.");
             return;
         }
         const hash = await hashPassword(password, user.salt);
         if (hash !== user.passwordHash) {
-            res.sendStatus(401);
+            res.status(401).send("Invalid credentials.");
             return;
         }
 
@@ -353,7 +443,7 @@ async function main() {
                 window: 2,
             });
             if (!valid) {
-                res.sendStatus(403);
+                res.status(401).send("Invalid credentials.");
                 return;
             }
         }
@@ -384,24 +474,19 @@ async function main() {
         res.send(JSON.stringify(balance));
     });
 
-    app.post("/wallet/secrets", protect, limiter, async (req, res) => {
-        const { password } = req.body;
-        const user = await storage.retrieveUser((req as any).user.userID);
-        if (!user) {
-            res.sendStatus(500);
-            return;
+    app.post(
+        "/wallet/secrets",
+        protect,
+        requirePW,
+        require2FA,
+        limiter,
+        async (req, res) => {
+            const secrets = await wallet.getSecrets((req as any).user.address);
+            res.send(JSON.stringify(secrets));
         }
-        const hash = await hashPassword(password, user.salt);
-        if (hash !== user.passwordHash) {
-            res.sendStatus(401);
-            return;
-        }
+    );
 
-        const secrets = await wallet.getSecrets((req as any).user.address);
-        res.send(JSON.stringify(secrets));
-    });
-
-    app.post("/wallet/send", protect, async (req, res) => {
+    app.post("/wallet/send", protect, require2FA, async (req, res) => {
         const { amount, address, paymentID } = req.body as {
             amount: number;
             address: string;
