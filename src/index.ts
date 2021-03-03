@@ -454,7 +454,7 @@ async function main() {
         delete tokenData.totpSecret;
 
         const token = jwt.sign({ user: tokenData }, process.env.SPK!, {
-            expiresIn: "1d",
+            expiresIn: user.twoFactor ? "7d" : "1d",
         });
         res.cookie("auth", token);
         res.send(JSON.stringify(tokenData));
