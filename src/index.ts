@@ -509,7 +509,9 @@ async function main() {
             return;
         }
         if (paymentID && address.length === 187) {
-            res.status(400).send("Can't provide both payment ID and address.");
+            res.status(400).send(
+                "Can't provide a payment ID with an integrated address."
+            );
             return;
         }
         const balance = await wallet.getBalance((req as any).user.address);
