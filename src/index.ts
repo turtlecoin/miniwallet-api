@@ -19,6 +19,7 @@ import {
     validateAddress,
     validateAddresses,
     validatePaymentID,
+    WalletError,
 } from "turtlecoin-wallet-backend";
 import rateLimit from "express-rate-limit";
 import Speakeasy from "speakeasy";
@@ -30,6 +31,7 @@ import * as uuid from "uuid";
 import fs from "fs";
 import WebSocket from "ws";
 import path from "path";
+import { deepEqual } from "assert";
 
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
@@ -462,9 +464,7 @@ async function main() {
 
     app.get("/wallet/transactions", protect, async (req, res) => {
         const user: IUser = (req as any).user;
-        const txs = await wallet.getTransactionHistory(
-            (req as any).user.address
-        );
+        const txs = await wallet.getTransactionHistory(user.address);
         res.send(txs);
     });
 
@@ -492,6 +492,7 @@ async function main() {
             address: string;
             paymentID?: string;
         };
+
         if (!Number.isInteger(amount)) {
             res.status(400).send("Invalid amount.");
             return;
@@ -503,7 +504,7 @@ async function main() {
             res.status(400).send("Invalid TRTL address.");
             return;
         }
-        if (paymentID && validatePaymentID(paymentID)) {
+        if (paymentID && validatePaymentID(paymentID).errorCode !== 0) {
             res.status(400).send("Invalid payment ID.");
             return;
         }
