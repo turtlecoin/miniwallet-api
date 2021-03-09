@@ -74,7 +74,6 @@ export const protect = (req: any, res: any, next: () => void) => {
 };
 
 const allowedOrigins = [
-    "http://localhost:8080",
     "https://trtl.co.in",
     "https://www.trtl.co.in",
     "http://trtlcoinonqzucp3usix72kol3nkhrinobmnewdm5742bbqjfhgietid.onion",
