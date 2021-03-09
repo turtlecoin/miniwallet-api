@@ -251,7 +251,6 @@ async function main() {
         cors({
             credentials: true,
             origin: (origin, callback) => {
-                console.log("origin", origin);
                 if (!origin) {
                     return callback(null, true);
                 }
