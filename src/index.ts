@@ -1,5 +1,4 @@
 import log, { LogLevelDesc } from "loglevel";
-import { loadEnv } from "./utils/loadEnv";
 import express from "express";
 import morgan from "morgan";
 import helmet from "helmet";
@@ -14,32 +13,31 @@ import { hashPassword } from "./utils/hashPassword";
 import { IUser, SerializedTx } from "./types";
 // tslint:disable-next-line: no-submodule-imports
 import { Transaction } from "turtlecoin-wallet-backend/dist/lib/Types";
-import { sleep } from "@extrahash/sleep";
-import {
-    validateAddress,
-    validateAddresses,
-    validatePaymentID,
-    WalletError,
-} from "turtlecoin-wallet-backend";
+import { validateAddress, validatePaymentID } from "turtlecoin-wallet-backend";
 import rateLimit from "express-rate-limit";
 import Speakeasy from "speakeasy";
 import QRCode from "qrcode";
 import { PriceScraper } from "./PriceScraper";
 import axios from "axios";
-import { hashUser } from "./utils/hashUser";
 import * as uuid from "uuid";
 import fs from "fs";
 import WebSocket from "ws";
 import path from "path";
-import { deepEqual } from "assert";
+import {
+    ALLOWED_ORIGINS,
+    COOKIE_OPTIONS,
+    KEYSTORE_HOST,
+    LOG_LEVEL,
+    PORT,
+    SPK,
+} from "./config";
 
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: 50, // limit each IP to 50 requests per windowMs
 });
 
-loadEnv();
-log.setLevel(process.env.LOG_LEVEL! as LogLevelDesc);
+log.setLevel(LOG_LEVEL);
 
 const usernameRegex = /^[a-zA-Z0-9_]{3,20}$/;
 
@@ -52,7 +50,7 @@ const checkAuth = (req: any, res: any, next: () => void) => {
 
     if (token) {
         try {
-            const result = jwt.verify(token, process.env.SPK!);
+            const result = jwt.verify(token, SPK);
 
             // lol glad this is a try/catch block
             (req as any).user = (result as any).user;
@@ -72,14 +70,6 @@ export const protect = (req: any, res: any, next: () => void) => {
 
     next();
 };
-
-const allowedOrigins = [
-    "http://localhost:8080",
-    "https://trtl.co.in",
-    "https://www.trtl.co.in",
-    "http://trtlcoinonqzucp3usix72kol3nkhrinobmnewdm5742bbqjfhgietid.onion",
-    "http://www.trtlcoinonqzucp3usix72kol3nkhrinobmnewdm5742bbqjfhgietid.onion",
-];
 
 async function main() {
     const expWs = expressWs(express());
@@ -187,7 +177,7 @@ async function main() {
         (async () => {
             // checking if all the keys are on the safu
             const res = await axios.post(
-                process.env.KEYSTORE_HOST + "/keys/check",
+                KEYSTORE_HOST + "/keys/check",
                 allUsers.map((user) => user.address)
             );
             const missingAddresses: string[] = res.data;
@@ -197,10 +187,11 @@ async function main() {
                     .getSpendKeys(address);
                 const viewKey = wallet.getWallet().getPrivateViewKey();
                 try {
-                    await axios.post(
-                        process.env.KEYSTORE_HOST + "/keys/submit",
-                        { address, spendKey, viewKey }
-                    );
+                    await axios.post(KEYSTORE_HOST + "/keys/submit", {
+                        address,
+                        spendKey,
+                        viewKey,
+                    });
                 } catch (err) {
                     log.warn("error storing key on safu");
                     log.warn(err.toString());
@@ -217,14 +208,14 @@ async function main() {
                 userMap.set(user.userID, user);
             });
             const res = await axios.post(
-                process.env.KEYSTORE_HOST + "/users/check",
+                KEYSTORE_HOST + "/users/check",
                 Object.fromEntries(userHashMap)
             );
             const neededUsers: number[] = res.data;
 
             for (const userID of neededUsers) {
                 await axios.post(
-                    process.env.KEYSTORE_HOST + "/users/submit",
+                    KEYSTORE_HOST + "/users/submit",
                     userMap.get(userID)
                 );
             }
@@ -260,10 +251,11 @@ async function main() {
         cors({
             credentials: true,
             origin: (origin, callback) => {
+                console.log("origin", origin);
                 if (!origin) {
                     return callback(null, true);
                 }
-                if (!allowedOrigins.includes(origin)) {
+                if (!ALLOWED_ORIGINS.includes(origin)) {
                     return callback(null, false);
                 }
                 return callback(null, true);
@@ -339,10 +331,10 @@ async function main() {
             const newTokenData: Partial<IUser> = { ...(req as any).user };
             newTokenData.twoFactor = false;
 
-            const token = jwt.sign({ user: newTokenData }, process.env.SPK!, {
+            const token = jwt.sign({ user: newTokenData }, SPK!, {
                 expiresIn: "1d",
             });
-            res.cookie("auth", token);
+            res.cookie("auth", token, COOKIE_OPTIONS);
             res.send(JSON.stringify(newTokenData));
 
             safu();
@@ -373,10 +365,10 @@ async function main() {
             await storage.updateUser(user.userID, updates);
             const newTokenData: Partial<IUser> = { ...(req as any).user };
             newTokenData.twoFactor = true;
-            const token = jwt.sign({ user: newTokenData }, process.env.SPK!, {
+            const token = jwt.sign({ user: newTokenData }, SPK, {
                 expiresIn: "1d",
             });
-            res.cookie("auth", token);
+            res.cookie("auth", token, COOKIE_OPTIONS);
             res.send(JSON.stringify(newTokenData));
         } else {
             res.status(401).send("Invalid credentials.");
@@ -406,8 +398,8 @@ async function main() {
 
     app.post("/logout", protect, async (req, res) => {
         const user: Partial<IUser> = (req as any).user;
-        const token = jwt.sign({ user }, process.env.SPK!, { expiresIn: -1 });
-        res.cookie("auth", token);
+        const token = jwt.sign({ user }, SPK, { expiresIn: -1 });
+        res.cookie("auth", token, COOKIE_OPTIONS);
         res.sendStatus(200);
     });
 
@@ -455,10 +447,10 @@ async function main() {
         delete tokenData.salt;
         delete tokenData.totpSecret;
 
-        const token = jwt.sign({ user: tokenData }, process.env.SPK!, {
+        const token = jwt.sign({ user: tokenData }, SPK, {
             expiresIn: user.twoFactor ? "7d" : "1d",
         });
-        res.cookie("auth", token);
+        res.cookie("auth", token, COOKIE_OPTIONS);
         res.send(JSON.stringify(tokenData));
     });
 
@@ -592,10 +584,10 @@ async function main() {
             delete tokenData.passwordHash;
             delete tokenData.salt;
 
-            const token = jwt.sign({ user: tokenData }, process.env.SPK!, {
+            const token = jwt.sign({ user: tokenData }, SPK, {
                 expiresIn: "1d",
             });
-            res.cookie("auth", token);
+            res.cookie("auth", token, COOKIE_OPTIONS);
             res.send(JSON.stringify(tokenData));
             safu();
         } catch (err) {
@@ -611,7 +603,6 @@ async function main() {
         console.log("New client", clientID);
 
         let alive = true;
-        let missedPings = 0;
 
         const heartbeat = () => {
             alive = true;
@@ -656,8 +647,8 @@ async function main() {
         clients.set(clientID, { user, socket: ws });
     });
 
-    app.listen(Number(process.env.PORT!), () => {
-        log.info(`API started on port ${process.env.PORT}`);
+    app.listen(Number(PORT), () => {
+        log.info(`API started on port ${PORT}`);
     });
 }
 

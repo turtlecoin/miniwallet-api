@@ -8,6 +8,12 @@ import { SerializedTx } from "./types";
 // tslint:disable-next-line: no-submodule-imports
 import { SendTransactionResult } from "turtlecoin-wallet-backend/dist/lib/Types";
 import { Address } from "turtlecoin-utils";
+import {
+    DAEMON_PORT,
+    DAEMON_URI,
+    WALLET_PASSWORD,
+    WALLET_PATH,
+} from "./config";
 
 export class Wallet extends EventEmitter {
     private static instance: Wallet;
@@ -28,10 +34,7 @@ export class Wallet extends EventEmitter {
 
     private constructor() {
         super();
-        this.daemon = new Daemon(
-            process.env.DAEMON_URI!,
-            Number(process.env.DAEMON_PORT!)
-        );
+        this.daemon = new Daemon(DAEMON_URI, Number(DAEMON_PORT));
     }
 
     public getSyncData() {
@@ -39,10 +42,7 @@ export class Wallet extends EventEmitter {
     }
 
     public save() {
-        this.getWallet().saveWalletToFile(
-            process.env.WALLET_PATH!,
-            process.env.WALLET_PASSWORD!
-        );
+        this.getWallet().saveWalletToFile(WALLET_PATH, WALLET_PASSWORD);
     }
 
     public getPublicViewKey() {
@@ -125,19 +125,16 @@ export class Wallet extends EventEmitter {
     }
 
     private async init() {
-        if (!fs.existsSync(process.env.WALLET_PATH!)) {
+        if (!fs.existsSync(WALLET_PATH!)) {
             log.info("Creating wallet file.");
             const newWallet = await WalletBackend.createWallet(this.daemon);
-            newWallet.saveWalletToFile(
-                process.env.WALLET_PATH!,
-                process.env.WALLET_PASSWORD!
-            );
+            newWallet.saveWalletToFile(WALLET_PATH!, WALLET_PASSWORD!);
         }
 
         const [wallet, err] = await WalletBackend.openWalletFromFile(
             this.daemon,
-            process.env.WALLET_PATH!,
-            process.env.WALLET_PASSWORD!,
+            WALLET_PATH!,
+            WALLET_PASSWORD!,
             {
                 scanCoinbaseTransactions: true,
             }

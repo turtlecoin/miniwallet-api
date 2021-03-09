@@ -6,3 +6,4 @@ dist
 *.sqlite
 *.wallet
 qrs
+src/config.ts
