@@ -7,6 +7,7 @@ export interface IUser {
     twoFactor: boolean;
     totpSecret: string | null;
     userHash: string;
+    confirmedRecovery: boolean;
 }
 
 export interface SerializedTx {

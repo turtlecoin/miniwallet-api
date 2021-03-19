@@ -22,6 +22,7 @@ import axios from "axios";
 import * as uuid from "uuid";
 import fs from "fs";
 import WebSocket from "ws";
+import { entropyToMnemonic } from "bip39";
 import path from "path";
 import {
     ALLOWED_ORIGINS,
@@ -293,6 +294,28 @@ async function main() {
                 res.sendFile(path.resolve(".", "qrs/" + address));
             }
         });
+    });
+
+    app.post("/account/recovery", protect, async (req, res) => {
+        const secrets = await wallet.getSecrets((req as any).user.address);
+        const mnemonic = entropyToMnemonic(secrets.spendKey);
+        res.send({
+            recovery: mnemonic,
+        });
+    });
+
+    app.patch("/account/recovery", protect, async (req, res) => {
+        const user: IUser = (req as any).user;
+
+        await storage.updateUser(user.userID, { confirmedRecovery: true });
+        const newTokenData: Partial<IUser> = { ...(req as any).user };
+        newTokenData.confirmedRecovery = true;
+
+        const token = jwt.sign({ user: newTokenData }, SPK!, {
+            expiresIn: "1d",
+        });
+        res.cookie("auth", token, COOKIE_OPTIONS);
+        res.send(JSON.stringify(newTokenData));
     });
 
     app.get("/account/totp/secret", protect, async (req, res) => {
@@ -576,6 +599,7 @@ async function main() {
             address,
             twoFactor: false,
             totpSecret: null,
+            confirmedRecovery: false,
         };
 
         try {

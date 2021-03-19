@@ -104,6 +104,7 @@ export class Storage extends EventEmitter {
                     table.boolean("twoFactor");
                     table.string("totpSecret");
                     table.string("userHash");
+                    table.boolean("confirmedRecovery");
                 });
             }
 
