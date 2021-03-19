@@ -22,7 +22,7 @@ import axios from "axios";
 import * as uuid from "uuid";
 import fs from "fs";
 import WebSocket from "ws";
-import { entropyToMnemonic } from "bip39";
+import { entropyToMnemonic, mnemonicToEntropy } from "bip39";
 import path from "path";
 import {
     ALLOWED_ORIGINS,
@@ -32,6 +32,7 @@ import {
     PORT,
     SPK,
 } from "./config";
+import { Address } from "turtlecoin-utils";
 
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
@@ -316,6 +317,46 @@ async function main() {
         });
         res.cookie("auth", token, COOKIE_OPTIONS);
         res.send(JSON.stringify(newTokenData));
+    });
+
+    app.post("/account/restore", async (req, res) => {
+        const { passphrase, newPassword } = req.body;
+
+        if (!passphrase) {
+            res.sendStatus(400);
+            return;
+        }
+
+        const spendKey = mnemonicToEntropy(passphrase.trim());
+        const viewKey = wallet.getWallet().getPrivateViewKey();
+
+        const address = await Address.fromKeys(spendKey, viewKey);
+        const userData: Partial<IUser> | null = await storage.retrieveUserByAddress(
+            await address.toString()
+        );
+
+        if (!userData) {
+            res.sendStatus(401);
+            return;
+        }
+
+        delete userData.passwordHash;
+        delete userData.salt;
+        delete userData.totpSecret;
+
+        if (!newPassword) {
+            res.status(260).send(userData);
+        } else {
+            if (newPassword.length < 8) {
+                res.status(400).send("Password must be of at least length 8.");
+                return;
+            }
+
+            const salt = crypto.randomBytes(24).toString("hex");
+            const passwordHash = await hashPassword(newPassword, salt);
+            await storage.updateUser(userData.userID!, { passwordHash, salt });
+            res.sendStatus(200);
+        }
     });
 
     app.get("/account/totp/secret", protect, async (req, res) => {

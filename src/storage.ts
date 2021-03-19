@@ -47,6 +47,7 @@ export class Storage extends EventEmitter {
     public async retrieveAllUsers(): Promise<IUser[]> {
         return (await this.db("users").select()).map((user: IUser) => {
             user.twoFactor = Boolean(user.twoFactor);
+            user.confirmedRecovery = Boolean(user.confirmedRecovery);
             return user;
         });
     }
@@ -57,6 +58,7 @@ export class Storage extends EventEmitter {
             return null;
         }
         rows[0].twoFactor = Boolean(rows[0].twoFactor);
+        rows[0].confirmedRecovery = Boolean(rows[0].confirmedRecovery);
         return rows[0];
     }
 
@@ -68,6 +70,17 @@ export class Storage extends EventEmitter {
             return null;
         }
         rows[0].twoFactor = Boolean(rows[0].twoFactor);
+        rows[0].confirmedRecovery = Boolean(rows[0].confirmedRecovery);
+        return rows[0];
+    }
+
+    public async retrieveUserByAddress(address: string): Promise<IUser | null> {
+        const rows = await this.db("users").select().where({ address });
+        if (rows.length === 0) {
+            return null;
+        }
+        rows[0].twoFactor = Boolean(rows[0].twoFactor);
+        rows[0].confirmedRecovery = Boolean(rows[0].confirmedRecovery);
         return rows[0];
     }
 
